@@ -337,7 +337,7 @@ int wp_log2s (int32_t value)
 
 int32_t wp_exp2s (int log)
 {
-    uint32_t value;
+    int32_t value;
 
     if (log < 0)
         return ~((uint32_t) wp_exp2s (-log) - 1);

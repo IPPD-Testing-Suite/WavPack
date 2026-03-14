@@ -256,7 +256,7 @@ static int get_ape_tag_item (M_Tag *m_tag, const char *item, char *value, int si
 
             if (type == APE_TAG_TYPE_BINARY) {
                 if (vsize <= size) {
-                    memcpy (value, p + isize + 1, vsize);
+                    memcpy (value, p + isize + 1, vsize + 1);
                     return vsize;
                 }
                 else
@@ -285,7 +285,7 @@ static int get_ape_tag_item (M_Tag *m_tag, const char *item, char *value, int si
 
 static int get_id3_tag_item (M_Tag *m_tag, const char *item, char *value, int size)
 {
-    char lvalue [64];
+    char lvalue [4];
     int len;
 
     lvalue [0] = 0;
@@ -432,7 +432,7 @@ static int append_ape_tag_item (WavpackContext *wpc, const char *item, const cha
         m_tag->ape_tag_hdr.item_count++;
         m_tag->ape_tag_hdr.length += new_item_len;
         p = m_tag->ape_tag_data = (unsigned char*)realloc (m_tag->ape_tag_data, m_tag->ape_tag_hdr.length);
-        p += m_tag->ape_tag_hdr.length - sizeof (APE_Tag_Hdr) - new_item_len;
+        p += m_tag->ape_tag_hdr.length - sizeof (APE_Tag_Hdr);
 
         *p++ = (unsigned char) vsize;
         *p++ = (unsigned char) (vsize >> 8);
