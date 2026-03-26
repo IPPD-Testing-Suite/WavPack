@@ -1,12 +1,29 @@
+/*
+ * binary_tag_fuzzer.c
+ *
+ * Targets Bug 2: memcpy size off-by-one in get_ape_tag_item()
+ * (src/tag_utils.c:259)
+ *
+ * The bug fires when a binary APEv2 tag item is read using the standard
+ * two-call pattern:
+ *   1. WavpackGetBinaryTagItem(wpc, name, NULL, 0)  -> returns vsize
+ *   2. malloc(vsize)
+ *   3. WavpackGetBinaryTagItem(wpc, name, buf, vsize) -> memcpy(..., vsize+1)
+ *
+ * Step 3 copies vsize+1 bytes into a vsize-byte allocation (one-byte
+ * heap overflow).  The source read is in-bounds; only the destination
+ * write overflows.
+ *
+ * Only binary tag items are enumerated here.  Text tags and sample
+ * decoding are not exercised — they cannot reach this code path.
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 #include "wavpack.h"
-
-#define BUF_SAMPLES 1024
 
 typedef struct {
     unsigned char ungetc_char, ungetc_flag;
@@ -66,80 +83,48 @@ static WavpackStreamReader64 raw_reader = {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    int flags = OPEN_TAGS | OPEN_EDIT_TAGS | OPEN_WRAPPER | OPEN_DSD_AS_PCM | OPEN_NO_CHECKSUM | OPEN_NORMALIZE |
-        (4 << OPEN_THREADS_SHFT);
     WavpackRawContext raw_wv;
     WavpackContext *wpc;
     char error[80];
-    int num_chans, mode;
-    int64_t total_samples;
-    int retval = 0;
+    int mode;
 
-    memset(&raw_wv, 0, sizeof(WavpackRawContext));
+    memset(&raw_wv, 0, sizeof(raw_wv));
     raw_wv.dptr = raw_wv.sptr = (unsigned char *)data;
     raw_wv.eptr = raw_wv.dptr + size;
-    wpc = WavpackOpenFileInputEx64(&raw_reader, &raw_wv, NULL, error, flags, 15);
 
-    if (!wpc) { retval = 1; goto exit_fn; }
+    wpc = WavpackOpenFileInputEx64(&raw_reader, &raw_wv, NULL, error,
+                                   OPEN_TAGS | OPEN_NO_CHECKSUM, 15);
+    if (!wpc)
+        return 0;
 
-    num_chans = WavpackGetNumChannels(wpc);
-    total_samples = WavpackGetNumSamples64(wpc);
     mode = WavpackGetMode(wpc);
 
     if (mode & MODE_VALID_TAG) {
         int num_binary_items = WavpackGetNumBinaryTagItems(wpc);
-        int num_items = WavpackGetNumTagItems(wpc), i;
-
-        for (i = 0; i < num_items; ++i) {
-            int item_len, value_len;
-            char *item, *value;
-
-            item_len = WavpackGetTagItemIndexed(wpc, i, NULL, 0);
-            item = (char *)malloc(item_len + 1);
-            WavpackGetTagItemIndexed(wpc, i, item, item_len + 1);
-            value_len = WavpackGetTagItem(wpc, item, NULL, 0);
-            value = (char *)malloc(value_len + 1);
-            WavpackGetTagItem(wpc, item, value, value_len + 1);
-            free(value);
-            free(item);
-        }
+        int i;
 
         for (i = 0; i < num_binary_items; ++i) {
             int item_len, value_len;
             char *item, *value;
 
+            /* Get the item name. */
             item_len = WavpackGetBinaryTagItemIndexed(wpc, i, NULL, 0);
             item = (char *)malloc(item_len + 1);
+            if (!item) continue;
             WavpackGetBinaryTagItemIndexed(wpc, i, item, item_len + 1);
+
+            /* Two-call read: query size, allocate exactly that, read.
+               The bug copies vsize+1 bytes into the vsize-byte buffer. */
             value_len = WavpackGetBinaryTagItem(wpc, item, NULL, 0);
             value = (char *)malloc(value_len);
-            WavpackGetBinaryTagItem(wpc, item, value, value_len);
-            free(value);
+            if (value) {
+                WavpackGetBinaryTagItem(wpc, item, value, value_len);
+                free(value);
+            }
             free(item);
         }
-
-        WavpackAppendTagItem(wpc, "Artist", "The Googlers", strlen("The Googlers"));
-        WavpackAppendTagItem(wpc, "Title", "Fuzz Me All Night Long", strlen("Fuzz Me All Night Long"));
-        WavpackAppendTagItem(wpc, "Album", "Meet The Googlers", strlen("Meet The Googlers"));
-        WavpackAppendBinaryTagItem(wpc, "Cover Art (Front)", (const char *)data, size < 4096 ? size : 4096);
     }
-
-    if (num_chans && num_chans <= 256) {
-        int32_t *decoded_samples = (int32_t *)malloc(BUF_SAMPLES * num_chans * sizeof(int32_t));
-        int unpack_result;
-
-        do {
-            unpack_result = WavpackUnpackSamples(wpc, decoded_samples, BUF_SAMPLES);
-        } while (unpack_result);
-
-        free(decoded_samples);
-    }
-
-    if (WavpackSeekSample64(wpc, total_samples / 3 + 1000))
-        WavpackWriteTag(wpc);
 
     WavpackCloseFile(wpc);
-
-exit_fn:
-    return retval;
+    return 0;
 }

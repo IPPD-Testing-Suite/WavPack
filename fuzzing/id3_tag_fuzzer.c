@@ -1,12 +1,28 @@
+/*
+ * id3_tag_fuzzer.c
+ *
+ * Targets Bug 4: stack buffer overflow in get_id3_tag_item()
+ * (src/tag_utils.c:288)
+ *
+ * The bug fires when WavpackGetTagItem() is called on a file that has an
+ * ID3v1 tag.  Inside get_id3_tag_item(), `tagcpy()` is called with
+ * sizeof(field)=30 as the source limit, but the destination buffer `lvalue`
+ * was shrunk from 64 bytes to 4 bytes.  Any title (or other field) with
+ * >= 4 non-space, non-null characters overflows the stack buffer.
+ *
+ * The overflow occurs even on the size-query call (NULL destination) because
+ * tagcpy fills `lvalue` before the NULL check.
+ *
+ * Only text (non-binary) tag items are exercised here.  Binary items and
+ * sample decoding cannot reach get_id3_tag_item().
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 #include "wavpack.h"
-
-#define BUF_SAMPLES 1024
 
 typedef struct {
     unsigned char ungetc_char, ungetc_flag;
@@ -66,80 +82,49 @@ static WavpackStreamReader64 raw_reader = {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    int flags = OPEN_TAGS | OPEN_EDIT_TAGS | OPEN_WRAPPER | OPEN_DSD_AS_PCM | OPEN_NO_CHECKSUM | OPEN_NORMALIZE |
-        (4 << OPEN_THREADS_SHFT);
     WavpackRawContext raw_wv;
     WavpackContext *wpc;
     char error[80];
-    int num_chans, mode;
-    int64_t total_samples;
-    int retval = 0;
+    int mode;
 
-    memset(&raw_wv, 0, sizeof(WavpackRawContext));
+    memset(&raw_wv, 0, sizeof(raw_wv));
     raw_wv.dptr = raw_wv.sptr = (unsigned char *)data;
     raw_wv.eptr = raw_wv.dptr + size;
-    wpc = WavpackOpenFileInputEx64(&raw_reader, &raw_wv, NULL, error, flags, 15);
 
-    if (!wpc) { retval = 1; goto exit_fn; }
+    wpc = WavpackOpenFileInputEx64(&raw_reader, &raw_wv, NULL, error,
+                                   OPEN_TAGS | OPEN_NO_CHECKSUM, 15);
+    if (!wpc)
+        return 0;
 
-    num_chans = WavpackGetNumChannels(wpc);
-    total_samples = WavpackGetNumSamples64(wpc);
     mode = WavpackGetMode(wpc);
 
     if (mode & MODE_VALID_TAG) {
-        int num_binary_items = WavpackGetNumBinaryTagItems(wpc);
-        int num_items = WavpackGetNumTagItems(wpc), i;
+        int num_items = WavpackGetNumTagItems(wpc);
+        int i;
 
         for (i = 0; i < num_items; ++i) {
             int item_len, value_len;
             char *item, *value;
 
+            /* Get the item name via the indexed call (uses get_id3_tag_item_indexed,
+               which has an adequate buffer and is not vulnerable). */
             item_len = WavpackGetTagItemIndexed(wpc, i, NULL, 0);
             item = (char *)malloc(item_len + 1);
+            if (!item) continue;
             WavpackGetTagItemIndexed(wpc, i, item, item_len + 1);
+
+            /* WavpackGetTagItem -> get_id3_tag_item -> tagcpy into lvalue[4].
+               The stack overflow fires here for any field value >= 4 chars. */
             value_len = WavpackGetTagItem(wpc, item, NULL, 0);
             value = (char *)malloc(value_len + 1);
-            WavpackGetTagItem(wpc, item, value, value_len + 1);
-            free(value);
+            if (value) {
+                WavpackGetTagItem(wpc, item, value, value_len + 1);
+                free(value);
+            }
             free(item);
         }
-
-        for (i = 0; i < num_binary_items; ++i) {
-            int item_len, value_len;
-            char *item, *value;
-
-            item_len = WavpackGetBinaryTagItemIndexed(wpc, i, NULL, 0);
-            item = (char *)malloc(item_len + 1);
-            WavpackGetBinaryTagItemIndexed(wpc, i, item, item_len + 1);
-            value_len = WavpackGetBinaryTagItem(wpc, item, NULL, 0);
-            value = (char *)malloc(value_len);
-            WavpackGetBinaryTagItem(wpc, item, value, value_len);
-            free(value);
-            free(item);
-        }
-
-        WavpackAppendTagItem(wpc, "Artist", "The Googlers", strlen("The Googlers"));
-        WavpackAppendTagItem(wpc, "Title", "Fuzz Me All Night Long", strlen("Fuzz Me All Night Long"));
-        WavpackAppendTagItem(wpc, "Album", "Meet The Googlers", strlen("Meet The Googlers"));
-        WavpackAppendBinaryTagItem(wpc, "Cover Art (Front)", (const char *)data, size < 4096 ? size : 4096);
     }
-
-    if (num_chans && num_chans <= 256) {
-        int32_t *decoded_samples = (int32_t *)malloc(BUF_SAMPLES * num_chans * sizeof(int32_t));
-        int unpack_result;
-
-        do {
-            unpack_result = WavpackUnpackSamples(wpc, decoded_samples, BUF_SAMPLES);
-        } while (unpack_result);
-
-        free(decoded_samples);
-    }
-
-    if (WavpackSeekSample64(wpc, total_samples / 3 + 1000))
-        WavpackWriteTag(wpc);
 
     WavpackCloseFile(wpc);
-
-exit_fn:
-    return retval;
+    return 0;
 }

@@ -1,12 +1,30 @@
+/*
+ * append_tag_fuzzer.c
+ *
+ * Targets Bug 5: wrong pointer offset in append_ape_tag_item()
+ * (src/tag_utils.c:435)
+ *
+ * The bug fires when WavpackAppendTagItem() is called on a file that
+ * already has an APEv2 tag (MODE_VALID_TAG set).  The injected change omits
+ * `- new_item_len` from the destination pointer calculation, advancing `p`
+ * too far into the realloc'd buffer.  For any item where
+ *   new_item_len = vsize + isize + 9 > 32
+ * (i.e., vsize + isize > 23), the subsequent write extends past the
+ * allocation.
+ *
+ * "Title" + "Fuzz Me All Night Long" gives new_item_len = 5+22+9 = 36,
+ * which exceeds 32 and causes a reliable 4-byte heap overflow.
+ *
+ * No text/binary tag reading or sample decoding is performed — those
+ * code paths cannot reach append_ape_tag_item().
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 #include "wavpack.h"
-
-#define BUF_SAMPLES 1024
 
 typedef struct {
     unsigned char ungetc_char, ungetc_flag;
@@ -66,80 +84,31 @@ static WavpackStreamReader64 raw_reader = {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    int flags = OPEN_TAGS | OPEN_EDIT_TAGS | OPEN_WRAPPER | OPEN_DSD_AS_PCM | OPEN_NO_CHECKSUM | OPEN_NORMALIZE |
-        (4 << OPEN_THREADS_SHFT);
     WavpackRawContext raw_wv;
     WavpackContext *wpc;
     char error[80];
-    int num_chans, mode;
-    int64_t total_samples;
-    int retval = 0;
+    int mode;
 
-    memset(&raw_wv, 0, sizeof(WavpackRawContext));
+    memset(&raw_wv, 0, sizeof(raw_wv));
     raw_wv.dptr = raw_wv.sptr = (unsigned char *)data;
     raw_wv.eptr = raw_wv.dptr + size;
-    wpc = WavpackOpenFileInputEx64(&raw_reader, &raw_wv, NULL, error, flags, 15);
 
-    if (!wpc) { retval = 1; goto exit_fn; }
+    wpc = WavpackOpenFileInputEx64(&raw_reader, &raw_wv, NULL, error,
+                                   OPEN_TAGS | OPEN_EDIT_TAGS | OPEN_NO_CHECKSUM, 15);
+    if (!wpc)
+        return 0;
 
-    num_chans = WavpackGetNumChannels(wpc);
-    total_samples = WavpackGetNumSamples64(wpc);
     mode = WavpackGetMode(wpc);
 
     if (mode & MODE_VALID_TAG) {
-        int num_binary_items = WavpackGetNumBinaryTagItems(wpc);
-        int num_items = WavpackGetNumTagItems(wpc), i;
-
-        for (i = 0; i < num_items; ++i) {
-            int item_len, value_len;
-            char *item, *value;
-
-            item_len = WavpackGetTagItemIndexed(wpc, i, NULL, 0);
-            item = (char *)malloc(item_len + 1);
-            WavpackGetTagItemIndexed(wpc, i, item, item_len + 1);
-            value_len = WavpackGetTagItem(wpc, item, NULL, 0);
-            value = (char *)malloc(value_len + 1);
-            WavpackGetTagItem(wpc, item, value, value_len + 1);
-            free(value);
-            free(item);
-        }
-
-        for (i = 0; i < num_binary_items; ++i) {
-            int item_len, value_len;
-            char *item, *value;
-
-            item_len = WavpackGetBinaryTagItemIndexed(wpc, i, NULL, 0);
-            item = (char *)malloc(item_len + 1);
-            WavpackGetBinaryTagItemIndexed(wpc, i, item, item_len + 1);
-            value_len = WavpackGetBinaryTagItem(wpc, item, NULL, 0);
-            value = (char *)malloc(value_len);
-            WavpackGetBinaryTagItem(wpc, item, value, value_len);
-            free(value);
-            free(item);
-        }
-
-        WavpackAppendTagItem(wpc, "Artist", "The Googlers", strlen("The Googlers"));
-        WavpackAppendTagItem(wpc, "Title", "Fuzz Me All Night Long", strlen("Fuzz Me All Night Long"));
-        WavpackAppendTagItem(wpc, "Album", "Meet The Googlers", strlen("Meet The Googlers"));
-        WavpackAppendBinaryTagItem(wpc, "Cover Art (Front)", (const char *)data, size < 4096 ? size : 4096);
+        /* Append a "Title" item with a 22-byte value.
+           new_item_len = len("Title") + 22 + 9 = 36 > 32, which is the
+           threshold at which the wrong-pointer bug writes past the allocation.
+           The heap overflow fires inside WavpackAppendTagItem(). */
+        WavpackAppendTagItem(wpc, "Title", "Fuzz Me All Night Long",
+                             (int)strlen("Fuzz Me All Night Long"));
     }
-
-    if (num_chans && num_chans <= 256) {
-        int32_t *decoded_samples = (int32_t *)malloc(BUF_SAMPLES * num_chans * sizeof(int32_t));
-        int unpack_result;
-
-        do {
-            unpack_result = WavpackUnpackSamples(wpc, decoded_samples, BUF_SAMPLES);
-        } while (unpack_result);
-
-        free(decoded_samples);
-    }
-
-    if (WavpackSeekSample64(wpc, total_samples / 3 + 1000))
-        WavpackWriteTag(wpc);
 
     WavpackCloseFile(wpc);
-
-exit_fn:
-    return retval;
+    return 0;
 }
