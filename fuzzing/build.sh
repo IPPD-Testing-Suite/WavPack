@@ -28,8 +28,14 @@ for HARNESS in channel_identities binary_tag entropy id3_tag append_tag; do
         $LIB_FUZZING_ENGINE $SRC/wavpack/src/.libs/libwavpack.a
 done
 
-# add seed corpora
-cp $SRC/wavpack/fuzzing/*_seed_corpus.zip $OUT/
+# add seed corpora (zip each directory into the OSS-Fuzz expected name)
+for HARNESS in channel_identities binary_tag entropy id3_tag append_tag; do
+    zip -j $OUT/${HARNESS}_fuzzer_seed_corpus.zip \
+        $SRC/wavpack/fuzzing/${HARNESS}_seed_corpus/*
+done
 
-# add dictionary and options
-cp $SRC/wavpack/fuzzing/*.dict $SRC/wavpack/fuzzing/*.options $OUT/
+# add dictionary and options (use the generic wavpack ones for all harnesses)
+for HARNESS in channel_identities binary_tag entropy id3_tag append_tag; do
+    cp $SRC/wavpack/fuzzing/fuzzer.dict $OUT/${HARNESS}_fuzzer.dict
+    cp $SRC/wavpack/fuzzing/fuzzer.options $OUT/${HARNESS}_fuzzer.options
+done
