@@ -16,19 +16,20 @@
 ################################################################################
 
 # build project
-# e.g.
+# Bug 3 requires UBSan signed-integer-overflow, so do NOT suppress it here.
 ./autogen.sh --disable-apps --disable-shared --enable-static
-CFLAGS="$CFLAGS -fno-sanitize=signed-integer-overflow" ./configure --disable-apps --disable-shared --enable-static
-CFLAGS="$CFLAGS -fno-sanitize=signed-integer-overflow" make
+./configure --disable-apps --disable-shared --enable-static
+make
 
 # build fuzzers
-# e.g.
-$CXX $CXXFLAGS -std=c++11 -I$SRC/wavpack/include -I$SRC/wavpack/cli \
-     $SRC/wavpack/fuzzing/fuzzer.cc -o $OUT/fuzzer \
-     $LIB_FUZZING_ENGINE $SRC/wavpack/src/.libs/libwavpack.a
+for HARNESS in channel_identities binary_tag entropy id3_tag append_tag; do
+    $CC $CFLAGS -std=c11 -I$SRC/wavpack/include \
+        $SRC/wavpack/fuzzing/${HARNESS}_fuzzer.c -o $OUT/${HARNESS}_fuzzer \
+        $LIB_FUZZING_ENGINE $SRC/wavpack/src/.libs/libwavpack.a
+done
 
-# add seed corpus
+# add seed corpora
 cp $SRC/wavpack/fuzzing/*_seed_corpus.zip $OUT/
 
-# add dictionary
+# add dictionary and options
 cp $SRC/wavpack/fuzzing/*.dict $SRC/wavpack/fuzzing/*.options $OUT/
