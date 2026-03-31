@@ -23,7 +23,7 @@ make
 
 # build fuzzers
 for HARNESS in channel_identities binary_tag entropy id3_tag append_tag; do
-    $CC $CFLAGS -std=c11 -I$SRC/wavpack/include \
+    $CC $CFLAGS -std=c11 -I$SRC/wavpack/include -include stdio.h \
         $SRC/wavpack/fuzzing/${HARNESS}_fuzzer.c -o $OUT/${HARNESS}_fuzzer \
         $LIB_FUZZING_ENGINE $SRC/wavpack/src/.libs/libwavpack.a
 done
